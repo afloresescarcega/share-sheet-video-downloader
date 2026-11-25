@@ -2,11 +2,21 @@
 
 # ShareDL
 
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=afloresescarcega_share-sheet-video-downloader&metric=alert_status)](https://sonarcloud.io/project/overview?id=afloresescarcega_share-sheet-video-downloader)
+
 Save videos from YouTube (including Shorts), TikTok, X/Twitter, Instagram, Reddit and [many more sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md) straight to your iPhone's camera roll from the share sheet.
 
 ```
 Share sheet → ShareDL extension → your Mac (yt-dlp + ffmpeg) → MP4 → Photos
 ```
+
+<p align="center">
+  <img src="docs/screenshots/app.png" width="250" alt="The ShareDL app, connected to the Mac server">
+  &nbsp;
+  <img src="docs/screenshots/share-sheet.png" width="250" alt="ShareDL in the iOS share sheet on a YouTube Short">
+  &nbsp;
+  <img src="docs/screenshots/saving.png" width="250" alt="The ShareDL share extension saving a video to the camera roll">
+</p>
 
 ShareDL is two small pieces:
 
