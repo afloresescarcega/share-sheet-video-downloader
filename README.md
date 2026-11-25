@@ -82,7 +82,7 @@ The server is meant for your private network only. It has these protections:
 Two important caveats:
 
 - **Use Tailscale on a laptop.** By default the server listens on every network the Mac joins, over plain HTTP, so on a café or office Wi-Fi others can reach it and could sniff the token. Use Tailscale (traffic is WireGuard-encrypted) and set `SHAREDL_HOST=<the Mac's Tailscale IP>` in `server/.env`, so the server is only reachable over your tailnet.
-- **Never port-forward 8787** on your router or expose it with a tunnel. If you think your token has leaked, delete the `SHAREDL_TOKEN` line from `server/.env`, re-run `install.sh` and rebuild the app with the new token.
+- **Never port-forward 8787** on your router or expose it with a tunnel. If you think your token has leaked, delete the `SHAREDL_TOKEN` line from `server/.env` and re-run `install.sh`. It generates a new token, restarts the server and prints the token. Put it in `API_TOKEN` in `ios/Config/Local.xcconfig` and rebuild the app.
 
 ## API
 

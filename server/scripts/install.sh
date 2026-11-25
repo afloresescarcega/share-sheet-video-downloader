@@ -16,12 +16,13 @@ done
 ./.venv/bin/pip install --quiet -r requirements.txt
 
 if [[ ! -f .env ]]; then
-  echo "SHAREDL_TOKEN=$(openssl rand -hex 24)" > .env
-  echo "SHAREDL_PORT=8787" >> .env
+  echo "SHAREDL_PORT=8787" > .env
   echo "# SHAREDL_HOST=100.x.y.z   # bind to your Tailscale IP only (see README > Security)" >> .env
   echo "# SHAREDL_COOKIES=$SERVER_DIR/cookies.txt" >> .env
-  chmod 600 .env
 fi
+# Also covers token rotation: delete the SHAREDL_TOKEN line and re-run this script.
+grep -q '^SHAREDL_TOKEN=.' .env || echo "SHAREDL_TOKEN=$(openssl rand -hex 24)" >> .env
+chmod 600 .env
 
 mkdir -p logs ~/Library/LaunchAgents
 chmod +x scripts/*.sh
@@ -53,7 +54,13 @@ PLIST
 
 for label in com.sharedl.server com.sharedl.update; do
   launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/$label.plist
+  # bootout is asynchronous; bootstrapping before the old job is gone fails with EIO.
+  for i in {1..50}; do launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break; sleep 0.2; done
+  for attempt in 1 2 3; do
+    launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/$label.plist 2>/dev/null && break
+    (( attempt == 3 )) && { echo "Failed to load $label; run: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$label.plist"; exit 1; }
+    sleep 1
+  done
 done
 
 source ./.env
