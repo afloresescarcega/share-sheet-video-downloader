@@ -1,0 +1,6 @@
+# Test/CI dependencies. Regenerate the hashed lock after editing:
+#   cd server && uv pip compile requirements-test.in --generate-hashes --python-version 3.13 \
+#     --python-platform linux --only-binary :all: --no-header -o requirements-test.lock
+-r requirements.txt
+pytest
+pytest-cov

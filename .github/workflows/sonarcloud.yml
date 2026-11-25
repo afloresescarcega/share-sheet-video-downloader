@@ -23,7 +23,7 @@ jobs:
           python-version: "3.13"
       - name: Test server with coverage
         run: |
-          pip install -r server/requirements.txt pytest pytest-cov
+          pip install --require-hashes --only-binary :all: -r server/requirements-test.lock
           pytest server/tests --cov=server --cov-report=xml:coverage.xml
       - uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
         env:
