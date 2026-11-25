@@ -234,7 +234,7 @@ def test_run_job_ffmpeg_failures(fake_ydl, monkeypatch, exc, error):
     assert (job.status, job.error) == ("error", error)
 
 
-def test_run_job_download_error(monkeypatch):
+def test_run_job_download_error(monkeypatch, caplog):
     class Failing(FakeYDL):
         def extract_info(self, url, download):
             raise app.yt_dlp.utils.DownloadError("ERROR: unsupported URL")
@@ -243,6 +243,7 @@ def test_run_job_download_error(monkeypatch):
     job = add_job(id="dl")
     app.run_job(job)
     assert (job.status, job.error) == ("error", "unsupported URL")
+    assert "'https://example.com/v'" in caplog.text  # failures name the URL, escaped via %r
 
 
 # --- ffmpeg helpers ----------------------------------------------------------------

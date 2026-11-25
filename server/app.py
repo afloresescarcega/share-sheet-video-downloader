@@ -258,7 +258,7 @@ def run_job(job: Job) -> None:
         job.file = final
         job.progress = 1.0
         job.status = "done"
-        log.info("job %s done: %s (%s)", job.id, job.url, job.title)
+        log.info("job %s done: %r (%r)", job.id, job.url, job.title)
     except subprocess.TimeoutExpired:
         fail_job(job, "conversion timed out")
     except subprocess.CalledProcessError as e:
@@ -269,7 +269,7 @@ def run_job(job: Job) -> None:
 
 def fail_job(job: Job, error: str) -> None:
     job.status, job.error = "error", error
-    log.error("job %s: %s", job.id, error)
+    log.error("job %s (%r): %s", job.id, job.url, error)
 
 
 def cleanup_loop() -> None:
@@ -317,7 +317,7 @@ def create_job(req: JobRequest) -> dict:
             raise HTTPException(status_code=429, detail="too many downloads in progress, try again shortly")
         jobs[job.id] = job
     executor.submit(run_job, job)
-    log.info("job %s queued", job.id)  # the URL is logged by run_job, not echoed from the request
+    log.info("job %s queued", job.id)  # run_job logs the URL, %r-escaped, when the job finishes or fails
     return {"id": job.id}
 
 
