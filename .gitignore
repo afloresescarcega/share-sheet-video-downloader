@@ -10,3 +10,6 @@ ios/*.xcodeproj/
 ios/build/
 xcuserdata/
 .verify/
+.coverage
+coverage.xml
+.pytest_cache/
