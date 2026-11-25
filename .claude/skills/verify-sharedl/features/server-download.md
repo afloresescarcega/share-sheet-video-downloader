@@ -11,7 +11,8 @@ Given a video URL, the Mac server downloads it with yt-dlp and returns an MP4 th
 - `dl-reencode`: a VP9/AV1-only source is re-encoded to H.264 with VideoToolbox.
 - `dl-error`: an unsupported or private URL ends `status=error` with yt-dlp's message.
 - `dl-auth`: requests without the bearer token get 401. `/health` without the token returns only `{"ok":true}`, with no version.
-- `dl-ssrf`: URLs whose host resolves to a private, loopback or link-local address (router, `localhost`, `169.254.169.254`), and non-http(s) schemes, are rejected with 400.
+- `dl-ssrf`: URLs whose host resolves to a private, loopback or link-local address (router, `localhost`, `169.254.169.254`), and non-http(s) schemes, are rejected up front with 400.
+- `dl-ssrf-redirect`: a public URL that redirects to a private address ends `status=error` with `blocked connection to non-public address`, and the internal target receives no request. This is the connection-level guard.
 - `dl-limits`: playlist URLs download only the first video. Live streams, videos over `SHAREDL_MAX_DURATION_MIN` (180) and files over `SHAREDL_MAX_FILESIZE_MB` (2048) end in `error` with a "skipped" message. More than `SHAREDL_MAX_ACTIVE_JOBS` (6) concurrent jobs gets 429.
 - `dl-nodocs`: `/docs`, `/redoc` and `/openapi.json` return 404.
 
@@ -38,6 +39,11 @@ Preconditions:
   - Run `curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"url":"http://192.168.1.1/"}' http://127.0.0.1:$PORT/jobs`.
   - The response is `{"detail":"private or local addresses are not allowed"}`.
   - Repeat with `http://localhost/` and `http://169.254.169.254/`.
+- **SSRF via redirect.**
+  - Serve a canary with `python3 -I -m http.server 58112 --bind 127.0.0.1 --directory <scratch dir>`, logging to a file.
+  - Run `$V api 'https://postman-echo.com/redirect-to?url=http://127.0.0.1:58112/canary.html' dl-ssrf-redirect`.
+  - It fails with `blocked connection to non-public address 127.0.0.1`, and the canary log has no `GET /canary` line.
+  - Stop the canary server by the pid you started.
 - **Limits.**
   - Start the instance with `SHAREDL_MAX_DURATION_MIN=0 $V up`.
   - Run `$V api 'https://www.youtube.com/watch?v=jNQXAC9IVRw' dl-limit`. It fails with `No video downloaded. Live streams, videos over 0 min ... are skipped.`
@@ -49,6 +55,8 @@ Preconditions:
 - **Evidence.** For each run, `evidence/<name>/` holds `video.mp4`, `ffprobe.json`, `codecs.txt` and `status.json`.
 
 ## Gotchas
+
+- httpbin.org and httpbingo.org refuse to redirect to loopback (403). Use postman-echo.com's `redirect-to`, which does.
 
 - There is no stable X reference URL yet. `NASA/status/1856794469347242240` has no video and fails with `No video could be found in this tweet`. That is not a regression.
 - `dl-reencode` needs a source with no avc1 stream, and none is pinned yet. Report it as unverified rather than claiming it via another feature.

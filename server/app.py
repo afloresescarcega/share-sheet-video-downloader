@@ -7,6 +7,8 @@ Flow: POST /jobs {"url": ...} -> {"id": ...}
 
 from __future__ import annotations
 
+import errno
+import importlib.util
 import ipaddress
 import json
 import logging
@@ -43,6 +45,71 @@ SUBPROCESS_TIMEOUT = 15 * 60
 
 if len(TOKEN) < 32:
     raise SystemExit("SHAREDL_TOKEN must be set (32+ chars). Run server/scripts/install.sh to generate one.")
+
+
+# --- Outbound connection guard -------------------------------------------------
+# Every outbound TCP connection this process makes (yt-dlp's urllib/requests/
+# websockets handlers, redirects, embedded URLs, manifests, fragments) goes through
+# socket.socket.connect. Checking the address actually being connected to blocks
+# redirects to private IPs and DNS rebinding, which a check of the submitted URL alone can't.
+
+class BlockedDestination(OSError):
+    pass
+
+
+def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+def _vetted_address(sock: socket.socket, address):
+    if sock.family not in (socket.AF_INET, socket.AF_INET6):
+        return address  # unix sockets etc.
+    host, port, *rest = address
+    try:
+        ip = ipaddress.ip_address(str(host).split("%")[0])
+    except ValueError:
+        # A hostname: resolve it here and connect to the exact address we checked.
+        infos = socket.getaddrinfo(host, port, sock.family, socket.SOCK_STREAM)
+        if not infos:
+            raise BlockedDestination(errno.EHOSTUNREACH, f"cannot resolve {host}")
+        address = infos[0][4]
+        ip = ipaddress.ip_address(address[0].split("%")[0])
+    if not _is_public(ip):
+        raise BlockedDestination(errno.EACCES, f"blocked connection to non-public address {ip}")
+    return address
+
+
+_real_connect = socket.socket.connect
+_real_connect_ex = socket.socket.connect_ex
+
+
+def _guarded_connect(self, address):
+    return _real_connect(self, _vetted_address(self, address))
+
+
+def _guarded_connect_ex(self, address):
+    return _real_connect_ex(self, _vetted_address(self, address))
+
+
+socket.socket.connect = _guarded_connect
+socket.socket.connect_ex = _guarded_connect_ex
+
+# curl_cffi does its networking in C, out of reach of the guard above.
+if importlib.util.find_spec("curl_cffi"):
+    raise SystemExit("curl_cffi is installed in the server venv; it bypasses the connection guard. Uninstall it.")
+
+# yt-dlp falls back to ffmpeg for some stream types, and ffmpeg opens its own
+# sockets. Refuse those downloads rather than let them skip the guard.
+from yt_dlp.downloader.external import FFmpegFD  # noqa: E402
+
+
+def _refuse_ffmpeg_download(self, filename, info_dict):
+    raise yt_dlp.utils.DownloadError("this stream needs ffmpeg to download it, which ShareDL disables for safety")
+
+
+FFmpegFD.real_download = _refuse_ffmpeg_download
 
 # Prefer streams Photos can play natively so we rarely need to re-encode.
 FORMAT = (
@@ -83,10 +150,10 @@ def require_token(authorization: str = Header(default="")) -> None:
 
 
 def check_public_url(url: str) -> None:
-    """Only allow http(s) URLs whose host resolves to public addresses.
+    """Fail fast on URLs that obviously point at private addresses.
 
-    Stops an authorized client from using yt-dlp to probe the Mac itself or the
-    home network (router admin pages, NAS, etc.).
+    This is only an early, friendly error. The real enforcement is the
+    connection guard above, which also covers redirects and DNS rebinding.
     """
     if len(url) > 2048:
         raise HTTPException(status_code=400, detail="URL too long")
@@ -98,7 +165,7 @@ def check_public_url(url: str) -> None:
     except (socket.gaierror, UnicodeError):
         raise HTTPException(status_code=400, detail="host does not resolve")
     for info in infos:
-        if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
+        if not _is_public(ipaddress.ip_address(info[4][0].split("%")[0])):
             raise HTTPException(status_code=400, detail="private or local addresses are not allowed")
 
 
@@ -108,7 +175,7 @@ class JobRequest(BaseModel):
 
 def probe_codecs(path: Path) -> tuple[str | None, str | None]:
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(path)],
+        ["ffprobe", "-v", "error", "-protocol_whitelist", "file", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(path)],
         capture_output=True, text=True, check=True, timeout=60,
     ).stdout
     video = audio = None
@@ -123,7 +190,7 @@ def probe_codecs(path: Path) -> tuple[str | None, str | None]:
 def make_photos_safe(src: Path, dst: Path) -> None:
     """Remux (or re-encode only when needed) into an MP4 the iOS Photos app accepts."""
     video, audio = probe_codecs(src)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
+    cmd = ["ffmpeg", "-y", "-v", "error", "-protocol_whitelist", "file", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
     if video == "h264":
         cmd += ["-c:v", "copy"]
     elif video == "hevc":
@@ -154,6 +221,7 @@ def run_job(job: Job) -> None:
         "playlist_items": "1",  # a playlist/channel URL downloads one video, not hundreds
         "max_filesize": MAX_FILESIZE,
         "match_filter": yt_dlp.utils.match_filter_func(f"!is_live & duration <=? {MAX_DURATION}"),
+        "external_downloader": {"default": "native"},
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
