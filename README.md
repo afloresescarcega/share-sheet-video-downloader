@@ -76,7 +76,7 @@ The server is meant for your private network only. It has these protections:
 
 - **Token on everything.** Every request needs the random 192-bit token. The server refuses to start without one. `/health` reveals nothing but `{"ok":true}` without it, and the API docs (`/docs`, `/openapi.json`) are turned off.
 - **No access to your own network.** Every outbound connection the server makes is checked against the IP address it actually connects to. Private, loopback, link-local and CGNAT/Tailscale addresses (your router, `localhost`, cloud metadata) are refused. The check covers redirects, URLs embedded in pages, manifests and DNS rebinding, so a leaked token can't be used to probe your home network.
-  - yt-dlp's rare ffmpeg-based stream downloads are disabled, since ffmpeg opens its own connections. A few exotic stream types (RTMP, some live formats) won't download.
+  - yt-dlp downloaders that run an external program (ffmpeg, rtmpdump, curl, wget, aria2c, …) are disabled, because those programs open their own connections. A few exotic stream types (RTMP, some live formats) won't download, even if the tools are installed.
   - ffmpeg is limited to local files when converting.
 - **Resource limits.** Playlist and channel links download only the first video. Live streams, videos over 3 hours and files over 2 GB are skipped, at most 6 downloads run at once, and ffmpeg has a timeout. You can tune these in `server/.env` with `SHAREDL_MAX_DURATION_MIN`, `SHAREDL_MAX_FILESIZE_MB` and `SHAREDL_MAX_ACTIVE_JOBS`.
 - **Updates.** yt-dlp updates itself daily. Keep ffmpeg current with `brew upgrade ffmpeg`, since it parses untrusted video files.

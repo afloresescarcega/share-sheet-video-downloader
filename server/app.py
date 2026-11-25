@@ -100,16 +100,22 @@ socket.socket.connect_ex = _guarded_connect_ex
 if importlib.util.find_spec("curl_cffi"):
     raise SystemExit("curl_cffi is installed in the server venv; it bypasses the connection guard. Uninstall it.")
 
-# yt-dlp falls back to ffmpeg for some stream types, and ffmpeg opens its own
-# sockets. Refuse those downloads rather than let them skip the guard.
-from yt_dlp.downloader.external import FFmpegFD  # noqa: E402
+# Some downloaders run an external program (ffmpeg, rtmpdump, curl, wget, aria2c,
+# axel, httpie) that opens its own sockets, out of reach of the guard above.
+# yt-dlp's subprocess downloaders all live in downloader/external.py (ExternalFD
+# and its subclasses) and downloader/rtmp.py, so refuse every one of them.
+from yt_dlp.downloader.external import ExternalFD  # noqa: E402
+from yt_dlp.downloader.rtmp import RtmpFD  # noqa: E402
 
 
-def _refuse_ffmpeg_download(self, filename, info_dict):
-    raise yt_dlp.utils.DownloadError("this stream needs ffmpeg to download it, which ShareDL disables for safety")
+def _refuse_external_download(self, filename, info_dict):
+    raise yt_dlp.utils.DownloadError(
+        "this stream needs an external program to download it, which ShareDL disables for safety"
+    )
 
 
-FFmpegFD.real_download = _refuse_ffmpeg_download
+ExternalFD.real_download = _refuse_external_download
+RtmpFD.real_download = _refuse_external_download
 
 # Prefer streams Photos can play natively so we rarely need to re-encode.
 FORMAT = (
