@@ -200,6 +200,7 @@ def fake_ydl(monkeypatch):
 
 
 def test_run_job_success(fake_ydl, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="sharedl")
     monkeypatch.setattr(app, "make_photos_safe", lambda src, dst: dst.write_bytes(b"mp4"))
     monkeypatch.setattr(app, "COOKIES_FILE", "cookies.txt")
     fake_ydl.info = {"_type": "playlist", "entries": [None, {"title": "First"}]}
