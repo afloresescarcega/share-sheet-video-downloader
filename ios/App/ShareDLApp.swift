@@ -14,12 +14,20 @@ struct ContentView: View {
     @State private var phase: VideoDownloader.Phase = .idle
     private let downloader = VideoDownloader()
 
+    private var statusColor: Color {
+        switch serverOK {
+        case nil: .gray
+        case true?: .green
+        case false?: .red
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
                 Section("Your Mac") {
                     HStack {
-                        Circle().fill(serverOK == nil ? .gray : serverOK! ? .green : .red).frame(width: 10)
+                        Circle().fill(statusColor).frame(width: 10)
                         Text(serverStatus).font(.subheadline)
                         Spacer()
                         Button("Retry") { Task { await checkServer() } }
@@ -28,7 +36,7 @@ struct ContentView: View {
                 }
 
                 Section("Paste a link") {
-                    TextField("https://…", text: $link)
+                    TextField("Link to a video", text: $link)
                         .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .submitLabel(.go).onSubmit(startDownload)
                     Button("Download to Photos") { startDownload() }

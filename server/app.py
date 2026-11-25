@@ -23,6 +23,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import urlsplit
 
 import yt_dlp
@@ -66,7 +67,7 @@ def _is_public(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 def _vetted_address(sock: socket.socket, address):
     if sock.family not in (socket.AF_INET, socket.AF_INET6):
         return address  # unix sockets etc.
-    host, port, *rest = address
+    host, port, *_ = address
     try:
         ip = ipaddress.ip_address(str(host).split("%")[0])
     except ValueError:
@@ -150,7 +151,7 @@ def token_ok(authorization: str) -> bool:
     return secrets.compare_digest(authorization.encode(), f"Bearer {TOKEN}".encode())
 
 
-def require_token(authorization: str = Header(default="")) -> None:
+def require_token(authorization: Annotated[str, Header()] = "") -> None:
     if not token_ok(authorization):
         raise HTTPException(status_code=401, detail="bad token")
 
@@ -257,16 +258,18 @@ def run_job(job: Job) -> None:
         job.file = final
         job.progress = 1.0
         job.status = "done"
-        log.info("done %s (%s)", job.url, job.title)
+        log.info("job %s done: %s (%s)", job.id, job.url, job.title)
     except subprocess.TimeoutExpired:
-        job.status, job.error = "error", "conversion timed out"
-        log.error("job %s: %s", job.id, job.error)
+        fail_job(job, "conversion timed out")
     except subprocess.CalledProcessError as e:
-        job.status, job.error = "error", f"ffmpeg failed: {e.stderr.decode(errors='ignore')[-300:]}"
-        log.error("job %s: %s", job.id, job.error)
+        fail_job(job, f"ffmpeg failed: {e.stderr.decode(errors='ignore')[-300:]}")
     except Exception as e:  # yt-dlp raises DownloadError with a useful message
-        job.status, job.error = "error", str(e).removeprefix("ERROR: ")[:500]
-        log.error("job %s: %s", job.id, job.error)
+        fail_job(job, str(e).removeprefix("ERROR: ")[:500])
+
+
+def fail_job(job: Job, error: str) -> None:
+    job.status, job.error = "error", error
+    log.error("job %s: %s", job.id, error)
 
 
 def cleanup_loop() -> None:
@@ -286,13 +289,25 @@ threading.Thread(target=cleanup_loop, daemon=True).start()
 
 
 @app.get("/health")
-def health(authorization: str = Header(default="")) -> dict:
+def health(authorization: Annotated[str, Header()] = "") -> dict:
     if not token_ok(authorization):
         return {"ok": True}  # liveness only; version details need the token
     return {"ok": True, "yt_dlp": yt_dlp.version.__version__}
 
 
-@app.post("/jobs", dependencies=[Depends(require_token)])
+AUTH_ERROR = {401: {"description": "Missing or wrong bearer token"}}
+NOT_FOUND = {404: {"description": "Unknown job"}}
+
+
+@app.post(
+    "/jobs",
+    dependencies=[Depends(require_token)],
+    responses={
+        **AUTH_ERROR,
+        400: {"description": "URL is not public http(s), too long, or does not resolve"},
+        429: {"description": "Too many downloads in progress"},
+    },
+)
 def create_job(req: JobRequest) -> dict:
     check_public_url(req.url)
     job = Job(id=uuid.uuid4().hex, url=req.url)
@@ -302,7 +317,7 @@ def create_job(req: JobRequest) -> dict:
             raise HTTPException(status_code=429, detail="too many downloads in progress, try again shortly")
         jobs[job.id] = job
     executor.submit(run_job, job)
-    log.info("queued %s", req.url)
+    log.info("job %s queued", job.id)  # the URL is logged by run_job, not echoed from the request
     return {"id": job.id}
 
 
@@ -313,13 +328,17 @@ def get_job(job_id: str) -> Job:
     return job
 
 
-@app.get("/jobs/{job_id}", dependencies=[Depends(require_token)])
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_token)], responses={**AUTH_ERROR, **NOT_FOUND})
 def job_status(job_id: str) -> dict:
     job = get_job(job_id)
     return {"id": job.id, "status": job.status, "progress": job.progress, "title": job.title, "error": job.error}
 
 
-@app.get("/jobs/{job_id}/file", dependencies=[Depends(require_token)])
+@app.get(
+    "/jobs/{job_id}/file",
+    dependencies=[Depends(require_token)],
+    responses={**AUTH_ERROR, **NOT_FOUND, 409: {"description": "Job has not finished"}},
+)
 def job_file(job_id: str) -> FileResponse:
     job = get_job(job_id)
     if job.status != "done" or not job.file:

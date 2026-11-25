@@ -26,7 +26,7 @@ final class ShareViewController: UIViewController {
 @MainActor
 final class ShareModel: ObservableObject {
     @Published var phase: VideoDownloader.Phase = .working("Reading link…", 0)
-    var close: () -> Void = {}
+    var close: () -> Void = { /* no-op until ShareViewController installs the real dismiss */ }
     private var task: Task<Void, Never>?
 
     func start(with providers: [NSItemProvider]) async {
