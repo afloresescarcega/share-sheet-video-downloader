@@ -199,7 +199,7 @@ def fake_ydl(monkeypatch):
     return FakeYDL
 
 
-def test_run_job_success(fake_ydl, monkeypatch):
+def test_run_job_success(fake_ydl, monkeypatch, caplog):
     monkeypatch.setattr(app, "make_photos_safe", lambda src, dst: dst.write_bytes(b"mp4"))
     monkeypatch.setattr(app, "COOKIES_FILE", "cookies.txt")
     fake_ydl.info = {"_type": "playlist", "entries": [None, {"title": "First"}]}
@@ -207,6 +207,7 @@ def test_run_job_success(fake_ydl, monkeypatch):
     app.run_job(job)
     assert (job.status, job.title, job.progress) == ("done", "First", 1.0)
     assert job.file.read_bytes() == b"mp4"
+    assert "job job1 started: 'https://example.com/v'" in caplog.text
 
 
 def test_run_job_nothing_downloaded(fake_ydl):

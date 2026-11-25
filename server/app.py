@@ -239,6 +239,7 @@ def run_job(job: Job) -> None:
         opts["cookiefile"] = COOKIES_FILE
 
     try:
+        log.info("job %s started: %r", job.id, job.url)
         job.status = "downloading"
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(job.url, download=True) or {}
@@ -317,7 +318,7 @@ def create_job(req: JobRequest) -> dict:
             raise HTTPException(status_code=429, detail="too many downloads in progress, try again shortly")
         jobs[job.id] = job
     executor.submit(run_job, job)
-    log.info("job %s queued", job.id)  # run_job logs the URL, %r-escaped, when the job finishes or fails
+    log.info("job %s queued", job.id)  # run_job logs the URL, %r-escaped, when the job starts
     return {"id": job.id}
 
 
