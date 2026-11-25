@@ -269,7 +269,7 @@ def run_job(job: Job) -> None:
 
 def fail_job(job: Job, error: str) -> None:
     job.status, job.error = "error", error
-    log.error("job %s (%r): %s", job.id, job.url, error)
+    log.error("job %s (%r): %r", job.id, job.url, error)
 
 
 def cleanup_loop() -> None:

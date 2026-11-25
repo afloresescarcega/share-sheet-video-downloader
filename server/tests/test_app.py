@@ -246,6 +246,15 @@ def test_run_job_download_error(monkeypatch, caplog):
     assert "'https://example.com/v'" in caplog.text  # failures name the URL, escaped via %r
 
 
+def test_fail_job_escapes_newlines_in_log(caplog):
+    job = add_job(id="crlf")
+    job.url = "https://example.com/a\r\nFAKE LOG LINE"
+    app.fail_job(job, f"Unsupported URL: {job.url}")
+    assert job.error == f"Unsupported URL: {job.url}"  # the API still returns the raw error
+    assert "\n" not in caplog.text.rstrip("\n")
+    assert caplog.text.count("FAKE LOG LINE") == 2  # URL and error text, each escaped
+
+
 # --- ffmpeg helpers ----------------------------------------------------------------
 
 def fake_run(probe_json: str, calls: list):
