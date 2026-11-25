@@ -18,6 +18,7 @@ done
 if [[ ! -f .env ]]; then
   echo "SHAREDL_TOKEN=$(openssl rand -hex 24)" > .env
   echo "SHAREDL_PORT=8787" >> .env
+  echo "# SHAREDL_HOST=100.x.y.z   # bind to your Tailscale IP only (see README > Security)" >> .env
   echo "# SHAREDL_COOKIES=$SERVER_DIR/cookies.txt" >> .env
   chmod 600 .env
 fi

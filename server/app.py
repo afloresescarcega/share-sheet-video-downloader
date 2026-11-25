@@ -7,11 +7,13 @@ Flow: POST /jobs {"url": ...} -> {"id": ...}
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -19,6 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yt_dlp
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -33,6 +36,13 @@ WORK_DIR = Path(os.environ.get("SHAREDL_WORK_DIR", ROOT / "downloads"))
 TOKEN = os.environ.get("SHAREDL_TOKEN", "")
 COOKIES_FILE = os.environ.get("SHAREDL_COOKIES")  # optional Netscape cookies.txt
 JOB_TTL_SECONDS = 60 * 60
+MAX_ACTIVE_JOBS = int(os.environ.get("SHAREDL_MAX_ACTIVE_JOBS", "6"))
+MAX_FILESIZE = int(os.environ.get("SHAREDL_MAX_FILESIZE_MB", "2048")) * 1024 * 1024
+MAX_DURATION = int(os.environ.get("SHAREDL_MAX_DURATION_MIN", "180")) * 60
+SUBPROCESS_TIMEOUT = 15 * 60
+
+if len(TOKEN) < 32:
+    raise SystemExit("SHAREDL_TOKEN must be set (32+ chars). Run server/scripts/install.sh to generate one.")
 
 # Prefer streams Photos can play natively so we rarely need to re-encode.
 FORMAT = (
@@ -42,7 +52,8 @@ FORMAT = (
 )
 
 WORK_DIR.mkdir(parents=True, exist_ok=True)
-app = FastAPI(title="ShareDL")
+# No interactive docs or schema: nothing about the API is visible without the token.
+app = FastAPI(title="ShareDL", docs_url=None, redoc_url=None, openapi_url=None)
 executor = ThreadPoolExecutor(max_workers=2)
 
 
@@ -62,11 +73,33 @@ jobs: dict[str, Job] = {}
 jobs_lock = threading.Lock()
 
 
+def token_ok(authorization: str) -> bool:
+    return secrets.compare_digest(authorization.encode(), f"Bearer {TOKEN}".encode())
+
+
 def require_token(authorization: str = Header(default="")) -> None:
-    if not TOKEN:
-        return
-    if not secrets.compare_digest(authorization, f"Bearer {TOKEN}"):
+    if not token_ok(authorization):
         raise HTTPException(status_code=401, detail="bad token")
+
+
+def check_public_url(url: str) -> None:
+    """Only allow http(s) URLs whose host resolves to public addresses.
+
+    Stops an authorized client from using yt-dlp to probe the Mac itself or the
+    home network (router admin pages, NAS, etc.).
+    """
+    if len(url) > 2048:
+        raise HTTPException(status_code=400, detail="URL too long")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise HTTPException(status_code=400, detail="not an http(s) URL")
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError):
+        raise HTTPException(status_code=400, detail="host does not resolve")
+    for info in infos:
+        if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
+            raise HTTPException(status_code=400, detail="private or local addresses are not allowed")
 
 
 class JobRequest(BaseModel):
@@ -76,7 +109,7 @@ class JobRequest(BaseModel):
 def probe_codecs(path: Path) -> tuple[str | None, str | None]:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(path)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=60,
     ).stdout
     video = audio = None
     for s in json.loads(out).get("streams", []):
@@ -100,7 +133,7 @@ def make_photos_safe(src: Path, dst: Path) -> None:
     cmd += ["-c:a", "copy"] if audio == "aac" else ["-c:a", "aac", "-b:a", "160k"]
     cmd += ["-movflags", "+faststart", str(dst)]
     log.info("ffmpeg video=%s audio=%s", video, audio)
-    subprocess.run(cmd, check=True, capture_output=True)
+    subprocess.run(cmd, check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT)
 
 
 def run_job(job: Job) -> None:
@@ -118,6 +151,9 @@ def run_job(job: Job) -> None:
         "merge_output_format": "mp4",
         "outtmpl": str(job_dir / "source.%(ext)s"),
         "noplaylist": True,
+        "playlist_items": "1",  # a playlist/channel URL downloads one video, not hundreds
+        "max_filesize": MAX_FILESIZE,
+        "match_filter": yt_dlp.utils.match_filter_func(f"!is_live & duration <=? {MAX_DURATION}"),
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -130,13 +166,16 @@ def run_job(job: Job) -> None:
     try:
         job.status = "downloading"
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(job.url, download=True)
+            info = ydl.extract_info(job.url, download=True) or {}
             if info.get("_type") == "playlist" and info.get("entries"):
-                info = next(e for e in info["entries"] if e)
+                info = next((e for e in info["entries"] if e), {})
             job.title = info.get("title")
         sources = [p for p in job_dir.iterdir() if p.name.startswith("source.") and p.suffix != ".part"]
         if not sources:
-            raise RuntimeError("yt-dlp finished but produced no file")
+            raise RuntimeError(
+                f"No video downloaded. Live streams, videos over {MAX_DURATION // 60} min "
+                f"and files over {MAX_FILESIZE // 2**20} MB are skipped."
+            )
         job.status = "processing"
         job.progress = 0.97
         final = job_dir / "video.mp4"
@@ -145,6 +184,9 @@ def run_job(job: Job) -> None:
         job.progress = 1.0
         job.status = "done"
         log.info("done %s (%s)", job.url, job.title)
+    except subprocess.TimeoutExpired:
+        job.status, job.error = "error", "conversion timed out"
+        log.error("job %s: %s", job.id, job.error)
     except subprocess.CalledProcessError as e:
         job.status, job.error = "error", f"ffmpeg failed: {e.stderr.decode(errors='ignore')[-300:]}"
         log.error("job %s: %s", job.id, job.error)
@@ -170,16 +212,20 @@ threading.Thread(target=cleanup_loop, daemon=True).start()
 
 
 @app.get("/health")
-def health() -> dict:
+def health(authorization: str = Header(default="")) -> dict:
+    if not token_ok(authorization):
+        return {"ok": True}  # liveness only; version details need the token
     return {"ok": True, "yt_dlp": yt_dlp.version.__version__}
 
 
 @app.post("/jobs", dependencies=[Depends(require_token)])
 def create_job(req: JobRequest) -> dict:
-    if not req.url.startswith(("http://", "https://")):
-        raise HTTPException(status_code=400, detail="not a URL")
+    check_public_url(req.url)
     job = Job(id=uuid.uuid4().hex, url=req.url)
     with jobs_lock:
+        active = sum(j.status in ("queued", "downloading", "processing") for j in jobs.values())
+        if active >= MAX_ACTIVE_JOBS:
+            raise HTTPException(status_code=429, detail="too many downloads in progress, try again shortly")
         jobs[job.id] = job
     executor.submit(run_job, job)
     log.info("queued %s", req.url)
