@@ -1,0 +1,9 @@
+// Defaults. Real values live in Local.xcconfig (gitignored) — copy Local.example.xcconfig.
+BUNDLE_PREFIX = com.example
+APP_DISPLAY_NAME = ShareDL
+DEVELOPMENT_TEAM =
+SERVER_HOST = localhost
+SERVER_PORT = 8787
+API_TOKEN =
+
+#include? "Local.xcconfig"

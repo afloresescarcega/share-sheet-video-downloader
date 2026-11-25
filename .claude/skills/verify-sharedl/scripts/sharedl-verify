@@ -1,0 +1,153 @@
+#!/bin/zsh
+# Verification harness for ShareDL. Runs an ISOLATED server instance (own port, token,
+# work dir) so it never touches the user's launchd server on :8787.
+#
+#   sharedl-verify up                    start isolated server, wait until usable
+#   sharedl-verify doctor                read-only health check of that instance
+#   sharedl-verify build-sim             build the app pointed at the instance (verify bundle id)
+#   sharedl-verify install-sim <udid>    install that build on a simulator
+#   sharedl-verify api <video-url> [name]  full server round trip; MP4 + ffprobe into evidence
+#   sharedl-verify photos <udid> [label] list videos in the simulator's camera roll (evidence)
+#   sharedl-verify down                  stop the instance, uninstall verify app, remove scratch
+#
+# Env: RUN_ID (default: today's date + pid on first `up`; remembered in .verify/current).
+set -euo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
+VERIFY_ROOT="$REPO/.verify"
+mkdir -p "$VERIFY_ROOT"
+if [[ -z "${RUN_ID:-}" ]]; then
+  if [[ "${1:-}" == up || ! -f "$VERIFY_ROOT/current" ]]; then RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"; else RUN_ID="$(<"$VERIFY_ROOT/current")"; fi
+fi
+RUN="$VERIFY_ROOT/$RUN_ID"
+INST="$RUN/instance"        # scratch: removed by `down`
+EVID="$RUN/evidence"        # proof: survives `down`
+BUNDLE_PREFIX="dev.sharedl.verify"
+APP_ID="$BUNDLE_PREFIX.sharedl"
+
+die() { echo "FAIL: $*" >&2; exit 1; }
+load() { [[ -f "$INST/env" ]] || die "no running instance for RUN_ID=$RUN_ID (run: sharedl-verify up)"; source "$INST/env"; }
+api_get() { curl -s -m 10 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT$1"; }
+
+cmd_up() {
+  [[ -x "$REPO/server/.venv/bin/uvicorn" ]] || die "server venv missing: run server/scripts/install.sh once"
+  for b in ffmpeg ffprobe deno; do command -v $b >/dev/null || die "missing $b (brew install ${b/ffprobe/ffmpeg})"; done
+  mkdir -p "$INST/downloads" "$EVID"
+  echo "$RUN_ID" > "$VERIFY_ROOT/current"
+  PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("",0));print(s.getsockname()[1])')
+  TOKEN=$(openssl rand -hex 16)
+  printf 'PORT=%s\nTOKEN=%s\n' "$PORT" "$TOKEN" > "$INST/env"
+  ( cd "$REPO/server" && SHAREDL_TOKEN="$TOKEN" SHAREDL_WORK_DIR="$INST/downloads" \
+      nohup ./.venv/bin/uvicorn app:app --host 0.0.0.0 --port "$PORT" > "$INST/server.log" 2>&1 & echo $! > "$INST/server.pid" )
+  for i in {1..40}; do
+    if curl -s -m 2 "http://127.0.0.1:$PORT/health" | grep -q '"ok":true'; then
+      echo "READY run=$RUN_ID port=$PORT pid=$(<"$INST/server.pid")"
+      echo "evidence dir: $EVID"
+      return
+    fi
+    sleep 0.5
+  done
+  tail -20 "$INST/server.log" >&2; die "server did not become healthy"
+}
+
+cmd_doctor() {
+  load
+  local pid=$(<"$INST/server.pid") ok=1
+  kill -0 "$pid" 2>/dev/null && echo "ok   process $pid alive" || { echo "BAD  process $pid not running"; ok=0; }
+  local owner=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)
+  [[ "$owner" == "$pid" ]] && echo "ok   port $PORT owned by our pid" || { echo "BAD  port $PORT owner='$owner' (expected $pid)"; ok=0; }
+  local health=$(curl -s -m 5 "http://127.0.0.1:$PORT/health")
+  [[ "$health" == *'"ok":true'* ]] && echo "ok   health $health" || { echo "BAD  health '$health'"; ok=0; }
+  local noauth=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:$PORT/jobs/x")
+  local auth=$(curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$PORT/jobs/x")
+  [[ "$noauth" == 401 && "$auth" == 404 ]] && echo "ok   auth enforced (no token=401, token=404 unknown job)" || { echo "BAD  auth noauth=$noauth auth=$auth"; ok=0; }
+  for b in ffmpeg ffprobe deno; do command -v $b >/dev/null && echo "ok   $b" || { echo "BAD  $b missing"; ok=0; }; done
+  local app="$INST/DerivedData/Build/Products/Debug-iphonesimulator/ShareDL.app"
+  if [[ -d "$app" ]]; then
+    local p=$(/usr/libexec/PlistBuddy -c 'Print :ServerPort' "$app/Info.plist")
+    [[ "$p" == "$PORT" ]] && echo "ok   sim build targets port $PORT" || { echo "BAD  sim build targets port $p, instance is $PORT (rebuild)"; ok=0; }
+  else
+    echo "--   no sim build yet (sharedl-verify build-sim)"
+  fi
+  (( ok )) && echo "DOCTOR OK run=$RUN_ID" || die "doctor found problems"
+}
+
+cmd_build_sim() {
+  load
+  ( cd "$REPO/ios" && xcodegen generate --quiet )
+  xcodebuild -project "$REPO/ios/ShareDL.xcodeproj" -scheme ShareDL \
+    -destination 'generic/platform=iOS Simulator' -derivedDataPath "$INST/DerivedData" \
+    CODE_SIGNING_ALLOWED=NO BUNDLE_PREFIX="$BUNDLE_PREFIX" APP_DISPLAY_NAME="ShareDL Verify" \
+    SERVER_HOST=127.0.0.1 SERVER_PORT="$PORT" API_TOKEN="$TOKEN" build > "$INST/build.log" 2>&1 \
+    || { grep -E 'error:' "$INST/build.log" | head >&2; die "build failed (log: $INST/build.log)"; }
+  echo "BUILT $INST/DerivedData/Build/Products/Debug-iphonesimulator/ShareDL.app (bundle $APP_ID)"
+}
+
+cmd_install_sim() {
+  load
+  local udid=${1:?udid required}
+  xcrun simctl install "$udid" "$INST/DerivedData/Build/Products/Debug-iphonesimulator/ShareDL.app"
+  echo "$udid" > "$INST/sim-udid"
+  echo "INSTALLED $APP_ID on $udid"
+}
+
+cmd_api() {
+  load
+  local url=${1:?video url required} name=${2:-api-$(date +%H%M%S)}
+  mkdir -p "$EVID/$name"
+  echo "$url" > "$EVID/$name/url.txt"
+  local id=$(curl -s -m 10 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "$(python3 -c 'import json,sys;print(json.dumps({"url":sys.argv[1]}))' "$url")" "http://127.0.0.1:$PORT/jobs" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+  local s=""
+  for i in {1..240}; do
+    s=$(api_get "/jobs/$id")
+    [[ "$s" == *'"status":"done"'* || "$s" == *'"status":"error"'* ]] && break
+    sleep 1
+  done
+  echo "$s" > "$EVID/$name/status.json"
+  [[ "$s" == *'"status":"done"'* ]] || die "job ended: $s"
+  curl -s -m 300 -H "Authorization: Bearer $TOKEN" -o "$EVID/$name/video.mp4" "http://127.0.0.1:$PORT/jobs/$id/file"
+  ffprobe -v error -show_entries stream=codec_type,codec_name,codec_tag_string,width,height:format=duration,format_name \
+    -of json "$EVID/$name/video.mp4" > "$EVID/$name/ffprobe.json"
+  local codecs=$(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(" ".join(s["codec_type"]+"="+s["codec_name"]+"/"+s["codec_tag_string"] for s in d["streams"]))' "$EVID/$name/ffprobe.json")
+  echo "$codecs" > "$EVID/$name/codecs.txt"
+  [[ "$codecs" =~ 'video=(h264/avc1|hevc/hvc1)' ]] || die "not Photos-safe video: $codecs"
+  [[ "$codecs" != *audio=* || "$codecs" == *'audio=aac/mp4a'* ]] || die "not Photos-safe audio: $codecs"
+  echo "PASS $name: $codecs -> $EVID/$name"
+}
+
+cmd_photos() {
+  local udid=${1:?udid required} label=${2:-photos-$(date +%H%M%S)}
+  local dcim="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/Media/DCIM"
+  mkdir -p "$EVID"
+  { find "$dcim" -type f \( -iname '*.mp4' -o -iname '*.mov' \) -exec stat -f '%m %z %N' {} \; 2>/dev/null | sort -n; } > "$EVID/$label.txt"
+  echo "$(wc -l < "$EVID/$label.txt" | tr -d ' ') videos in camera roll -> $EVID/$label.txt"
+}
+
+cmd_down() {
+  if [[ -f "$INST/env" ]]; then
+    source "$INST/env"
+    cp "$INST/server.log" "$EVID/server.log" 2>/dev/null || true
+    if [[ -f "$INST/server.pid" ]]; then
+      local pid=$(<"$INST/server.pid")
+      if ps -p "$pid" -o command= 2>/dev/null | grep -q "uvicorn app:app.*--port $PORT"; then kill "$pid"; echo "stopped server pid $pid"; fi
+    fi
+    [[ -f "$INST/sim-udid" ]] && xcrun simctl uninstall "$(<"$INST/sim-udid")" "$APP_ID" 2>/dev/null && echo "uninstalled $APP_ID"
+  fi
+  rm -rf "$INST"
+  [[ -f "$VERIFY_ROOT/current" && "$(<"$VERIFY_ROOT/current")" == "$RUN_ID" ]] && rm -f "$VERIFY_ROOT/current"
+  echo "CLEANED run=$RUN_ID; evidence kept at $EVID"
+}
+
+case "${1:-}" in
+  up) cmd_up ;;
+  doctor) cmd_doctor ;;
+  build-sim) cmd_build_sim ;;
+  install-sim) shift; cmd_install_sim "$@" ;;
+  api) shift; cmd_api "$@" ;;
+  photos) shift; cmd_photos "$@" ;;
+  down) cmd_down ;;
+  *) sed -n '2,13p' "$0"; exit 2 ;;
+esac

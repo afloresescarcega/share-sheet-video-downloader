@@ -1,0 +1,6 @@
+// Copy to Local.xcconfig and fill in. Then run: cd ios && xcodegen
+BUNDLE_PREFIX = com.yourname            // must be globally unique-ish
+DEVELOPMENT_TEAM = ABCDE12345           // Xcode > Settings > Accounts > your team ID
+SERVER_HOST = your-mac.your-tailnet.ts.net   // Tailscale MagicDNS name, or YourMac.local on home Wi-Fi
+SERVER_PORT = 8787
+API_TOKEN = paste-SHAREDL_TOKEN-from-server/.env

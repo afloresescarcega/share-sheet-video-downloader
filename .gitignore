@@ -1,0 +1,12 @@
+.DS_Store
+server/.venv/
+server/.env
+server/downloads/
+server/logs/
+server/cookies.txt
+__pycache__/
+ios/Config/Local.xcconfig
+ios/*.xcodeproj/
+ios/build/
+xcuserdata/
+.verify/
